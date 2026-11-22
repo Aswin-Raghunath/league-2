@@ -399,12 +399,17 @@
   let squads = {};           // filled from the database
   let isAdmin = false;
 
-  const tabs = ["Standings", "Fixtures", "Playoffs", "Squads", "Records", "Golden Boot", "Player Stats", "Rules", "Admin"];
+  const tabs = ["Standings", "Fixtures", "Playoffs", "Squads", "Records", "Golden Boot", "Golden Glove", "Player Stats", "Rules", "Admin"];
+  function visibleTabs() {      // Golden Glove only exists from Season 2 onwards
+    return tabs.filter(function (t) { return t !== "Golden Glove" || CUR.glove; });
+  }
   let currentTab = "Standings";
   let currentRound = 0;
   let currentTeam = "T1";
   let bootTeam = "T1";
   let goalLog = [];
+  let saveLog = [];
+  let gloveTeam = "T1";
   let statTeam = "all";
   let statSort = "goals";
 
@@ -499,8 +504,13 @@
   }
 
   // Season 1 rows keep their original keys (R1-1, q1, T1). Later seasons add a prefix (S2-R1-1, S2-q1, S2-T1).
-  function seasonOf(key) { const m = /^S(\d+)-/.exec(String(key)); return m ? Number(m[1]) : 1; }
-  function stripKey(key) { return String(key).replace(/^S\d+-/, ""); }
+  function seasonOf(key) {
+    const k = String(key), m = /^S(\d+)-/.exec(k);
+    if (m) { return Number(m[1]); }
+    return /^SV\d+-/.test(k) ? -1 : 1;          // -1 = a saves entry, never a goal
+  }
+  function savesSeasonOf(key) { const m = /^SV(\d+)-/.exec(String(key)); return m ? Number(m[1]) : 0; }
+  function stripKey(key) { return String(key).replace(/^SV?\d+-/, ""); }
   function dbKey(key) { return CUR.prefix + key; }
 
   function applySeason() {
@@ -517,6 +527,8 @@
       if (seasonOf(row.team) === SEASON) { squads[stripKey(row.team)] = { owner: row.owner || "", players: row.players || "" }; }
     });
     goalLog = raw.g.filter(function (g) { return seasonOf(g.team) === SEASON; })
+                   .map(function (g) { return Object.assign({}, g, { team: stripKey(g.team) }); });
+    saveLog = raw.g.filter(function (g) { return savesSeasonOf(g.team) === SEASON; })
                    .map(function (g) { return Object.assign({}, g, { team: stripKey(g.team) }); });
   }
 
@@ -563,9 +575,9 @@
 
   // =============== SEASONS ===============
   const SEASONS = {
-    1: { label: "Season 1", prefix: "", teams: TEAMS_S1, schedule: SCHEDULE_S1, rounds: 14, playoffTeams: 4, teamCount: 8,
+    1: { label: "Season 1", prefix: "", teams: TEAMS_S1, schedule: SCHEDULE_S1, rounds: 14, playoffTeams: 4, teamCount: 8, glove: false,
          tagline: "8 teams · home & away · 14 rounds · top 4 to the IPL-style playoffs" },
-    2: { label: "Season 2", prefix: "S2-", teams: TEAMS_S2, schedule: SCHEDULE_S2, rounds: 18, playoffTeams: 6, teamCount: 10,
+    2: { label: "Season 2", prefix: "S2-", teams: TEAMS_S2, schedule: SCHEDULE_S2, rounds: 18, playoffTeams: 6, teamCount: 10, glove: true,
          tagline: "10 teams · home & away · 18 rounds · top 6 to the IPL-style playoffs" }
   };
   let SEASON = 2;
@@ -588,7 +600,8 @@
     SEASON = n; CUR = SEASONS[n]; ROUNDS = CUR.rounds; teams = CUR.teams;
     try { localStorage.setItem("season", String(n)); } catch (e) {}
     currentRound = 0; currentTeam = "T1"; bootTeam = "T1"; statTeam = "all";
-    if (currentTab === "Team") { currentTab = "Standings"; }
+    if (currentTab === "Team" || (currentTab === "Golden Glove" && !CUR.glove)) { currentTab = "Standings"; }
+    gloveTeam = "T1";
     applySeason();
     updateHeader();
     lastKey = currentTab + (currentTab === "Fixtures" ? currentRound : "");   // no slow entrance animation
@@ -1192,6 +1205,89 @@
     });
   }
 
+
+  // =============== GOLDEN GLOVE (most saves, Season 2 onwards) ===============
+  function gloveTotals() {
+    const map = {};
+    saveLog.forEach(function (g) {
+      const k = g.team + "|" + g.player;
+      if (!map[k]) { map[k] = { team: g.team, player: g.player, saves: 0, games: {} }; }
+      map[k].saves += g.goals;
+      if (g.round) { map[k].games[g.round] = 1; }
+    });
+    return Object.keys(map).map(function (k) { return map[k]; }).sort(function (a, b) {
+      return b.saves - a.saves || a.player.localeCompare(b.player);
+    });
+  }
+  function pageGlove() {
+    const list = gloveTotals();
+    let html = "<div class='card'><h2>🧤 Golden Glove</h2>" +
+      "<p class='legend' style='margin:0'>Awarded to the goalkeeper who makes the most saves over the season. Saves are added by the admin after each match.</p></div>";
+
+    html += "<div class='card scroll'><h3>Most saves</h3>";
+    if (!list.length) {
+      html += "<p class='legend'>No saves logged yet. The race starts after the first match.</p>";
+    } else {
+      html += "<table class='std'><tr><th>#</th><th class='left'>Goalkeeper</th><th class='left'>Team</th><th>Saves</th></tr>";
+      let rank = 0, prev = null;
+      list.slice(0, 20).forEach(function (p, i) {
+        if (p.saves !== prev) { rank = i + 1; prev = p.saves; }
+        html += "<tr class='" + (rank === 1 ? "top4" : "") + "'><td>" + (rank === 1 ? "🧤" : rank) + "</td>" +
+          "<td class='left'><b>" + esc(p.player) + "</b></td>" +
+          "<td class='left'>" + crest(p.team, "sm") + tn(p.team) + "</td>" +
+          "<td class='pts'>" + p.saves + "</td></tr>";
+      });
+      html += "</table>";
+      if (list.length > 20) { html += "<p class='legend'>Showing the top 20 of " + list.length + " goalkeepers.</p>"; }
+    }
+    html += "</div>";
+
+    if (isAdmin) {
+      const pl = playerList((squads[gloveTeam] || { players: "" }).players);
+      html += "<div class='card'><h3>Admin: add saves</h3><div class='row'>" +
+        "<select id='gt' onchange=\"gloveTeam=this.value;render()\">" +
+        Object.keys(teams).map(function (c) { return "<option value='" + c + "'" + (c === gloveTeam ? " selected" : "") + ">" + teams[c] + "</option>"; }).join("") + "</select>" +
+        "<select id='gp'>" + (pl.length ? pl.map(function (p) { return "<option value=\"" + esc(p) + "\">" + esc(p) + "</option>"; }).join("") :
+          "<option value=''>Add this team's squad first</option>") + "</select>" +
+        "<input id='gs' type='number' min='1' value='1' style='width:70px'>" +
+        "<select id='gr'><option value=''>Round (optional)</option>" +
+        Array.from({ length: ROUNDS }, function (_, i) { return "<option value='" + (i + 1) + "'>Round " + (i + 1) + "</option>"; }).join("") + "</select>" +
+        "<button class='btn' onclick='saveSaves()'>Add saves</button></div>";
+      html += "<h3 style='margin-top:14px'>Recent entries</h3>";
+      const recent = saveLog.slice().sort(function (a, b) { return b.id - a.id; }).slice(0, 12);
+      html += recent.length ? recent.map(function (g) {
+        return "<div class='tm'><span>🧤 <b>" + esc(g.player) + "</b> (" + teams[g.team] + ") ×" + g.goals + (g.round ? " · R" + g.round : "") +
+               "</span><button class='g' onclick='deleteSaves(" + g.id + ")'>✕</button></div>";
+      }).join("") : "<p class='legend'>Nothing logged yet.</p>";
+      html += "</div>";
+    }
+    return html;
+  }
+  async function saveSaves() {
+    if (!isAdmin) { return; }
+    const player = document.getElementById("gp").value;
+    const saves = parseInt(document.getElementById("gs").value, 10);
+    const round = document.getElementById("gr").value;
+    if (!player) { setStatus("Pick a goalkeeper first (add the squad in the Squads tab)."); return; }
+    if (!saves || saves < 1) { setStatus("Enter at least 1 save."); return; }
+    const row = { team: "SV" + SEASON + "-" + gloveTeam, player: player, goals: saves };   // the goals column holds the save count
+    if (round) { row.round = Number(round); }
+    const res = await sb.from("goals").insert(row).select();
+    if (res.error) { setStatus("Could not save: " + res.error.message); return; }
+    raw.g.push(res.data[0]);
+    saveLog.push(Object.assign({}, res.data[0], { team: gloveTeam }));
+    setStatus(player + ": " + saves + " save(s) saved.");
+    render();
+  }
+  async function deleteSaves(id) {
+    if (!isAdmin) { return; }
+    const res = await sb.from("goals").delete().eq("id", id);
+    if (res.error) { setStatus("Could not delete: " + res.error.message); return; }
+    raw.g = raw.g.filter(function (g) { return g.id !== id; });
+    saveLog = saveLog.filter(function (g) { return g.id !== id; });
+    render();
+  }
+
   async function saveGoal() {
     if (!isAdmin) { return; }
     const player = document.getElementById("bp").value;
@@ -1391,7 +1487,7 @@
   function render() {
     const nv = document.getElementById("nav");
     const keepScroll = nv.scrollLeft;
-    nv.innerHTML = tabs.map(function (t) {
+    nv.innerHTML = visibleTabs().map(function (t) {
       const label = (t === "Admin" && isAdmin) ? "Admin ✓" : t;
       return "<button class='" + (t === currentTab ? "on" : "") + "' onclick=\"currentTab='" + t + "';render()\">" + label + "</button>";
     }).join("") + installButton();
@@ -1400,7 +1496,7 @@
     if (onBtn && (onBtn.offsetLeft < nv.scrollLeft || onBtn.offsetLeft + onBtn.offsetWidth > nv.scrollLeft + nv.clientWidth)) {
       nv.scrollLeft = onBtn.offsetLeft - (nv.clientWidth - onBtn.offsetWidth) / 2;
     }
-    const pages = { Standings: pageStandings, Fixtures: pageFixtures, Playoffs: pagePlayoffs, Squads: pageSquads, Records: pageRecords, "Golden Boot": pageBoot, "Player Stats": pageStats, Rules: pageRules, Admin: pageAdmin, Team: pageTeam };
+    const pages = { Standings: pageStandings, Fixtures: pageFixtures, Playoffs: pagePlayoffs, Squads: pageSquads, Records: pageRecords, "Golden Boot": pageBoot, "Golden Glove": pageGlove, "Player Stats": pageStats, Rules: pageRules, Admin: pageAdmin, Team: pageTeam };
     const app = document.getElementById("app");
     const key = currentTab + (currentTab === "Fixtures" ? currentRound : "");
     app.classList.remove("enter");          // so a refresh or a tap never replays the entrance animation
